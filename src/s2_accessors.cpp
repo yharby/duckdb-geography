@@ -5,6 +5,7 @@
 
 #include "s2/s2earth.h"
 #include "s2geography/accessors.h"
+#include "s2geography/accessors-geog.h"
 
 #include "s2/s2cell_union.h"
 #include "s2_geography_serde.hpp"
@@ -523,6 +524,74 @@ SELECT s2_num_points(s2_data_country('Canada'));
   }
 };
 
+struct S2Centroid {
+  static void Register(ExtensionLoader& loader) {
+    FunctionBuilder::RegisterScalar(
+        loader, "s2_centroid", [](ScalarFunctionBuilder& func) {
+          func.AddVariant([](ScalarFunctionVariantBuilder& variant) {
+            variant.AddParameter("geog", Types::GEOGRAPHY());
+            variant.SetReturnType(Types::GEOGRAPHY());
+            variant.SetFunction(ExecuteFn);
+          });
+
+          func.SetDescription(R"(
+Returns the centroid of the geography as a point.
+
+For points, the centroid is the average of all points. For linestrings,
+the centroid is weighted by segment length. For polygons, the centroid
+is the center of mass. Returns an empty point if the input is empty.
+)");
+          func.SetExample(R"(
+SELECT s2_centroid('POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))'::GEOGRAPHY).s2_format(6) AS centroid;
+----
+SELECT s2_centroid('LINESTRING (0 0, 10 10)'::GEOGRAPHY).s2_format(6) AS centroid;
+)");
+
+          func.SetTag("ext", "geography");
+          func.SetTag("category", "accessors");
+        });
+  }
+
+  static inline void ExecuteFn(DataChunk& args, ExpressionState& state, Vector& result) {
+    Execute(args.data[0], result, args.size());
+  }
+
+  static void Execute(Vector& source, Vector& result, idx_t count) {
+    GeographyDecoder decoder;
+    GeographyEncoder encoder;
+
+    UnaryExecutor::Execute<string_t, string_t>(
+        source, result, count, [&](string_t geog_str) {
+          decoder.DecodeTag(geog_str);
+
+          // Empty input returns empty output
+          if (decoder.tag.flags & s2geography::EncodeTag::kFlagEmpty) {
+            auto empty_geog = make_uniq<s2geography::GeographyCollection>();
+            return StringVector::AddStringOrBlob(result, encoder.Encode(*empty_geog));
+          }
+
+          // For cell centers, the centroid is the cell center itself
+          if (decoder.tag.kind == s2geography::GeographyKind::CELL_CENTER) {
+            return StringVector::AddStringOrBlob(result, geog_str);
+          }
+
+          // Decode and compute centroid
+          auto geog = decoder.Decode(geog_str);
+          S2Point centroid = s2geography::s2_centroid(*geog);
+
+          // If centroid is valid (non-zero), return it as a point
+          if (centroid.Norm2() > 0) {
+            auto point_geog = make_uniq<s2geography::PointGeography>(centroid.Normalize());
+            return StringVector::AddStringOrBlob(result, encoder.Encode(*point_geog));
+          } else {
+            // Invalid centroid (e.g., empty collection)
+            auto empty_geog = make_uniq<s2geography::GeographyCollection>();
+            return StringVector::AddStringOrBlob(result, encoder.Encode(*empty_geog));
+          }
+        });
+  }
+};
+
 }  // namespace
 
 void RegisterS2GeographyAccessors(ExtensionLoader& loader) {
@@ -535,6 +604,7 @@ void RegisterS2GeographyAccessors(ExtensionLoader& loader) {
   S2XY::Register(loader);
   S2Dimension::Register(loader);
   S2NumPoints::Register(loader);
+  S2Centroid::Register(loader);
 }
 
 }  // namespace duckdb_s2

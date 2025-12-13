@@ -181,3 +181,35 @@ query I
 SELECT s2_num_points('GEOMETRYCOLLECTION EMPTY');
 ----
 0
+
+# Centroid
+
+# Centroid of polygon
+query I
+SELECT s2_centroid('POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))'::GEOGRAPHY).s2_format(0);
+----
+POINT (5 5)
+
+# Centroid of linestring
+query I
+SELECT s2_centroid('LINESTRING (0 0, 10 10)'::GEOGRAPHY).s2_format(0);
+----
+POINT (5 5)
+
+# Centroid of point
+query I
+SELECT s2_centroid('POINT (5 5)'::GEOGRAPHY).s2_format(6);
+----
+POINT (5 5)
+
+# Centroid of empty returns empty
+query I
+SELECT s2_centroid('POINT EMPTY'::GEOGRAPHY);
+----
+GEOMETRYCOLLECTION EMPTY
+
+# Centroid of country
+query I
+SELECT s2_centroid(s2_data_country('Canada')).s2_format(0);
+----
+POINT (-96 60)
