@@ -154,6 +154,37 @@ SELECT s2_equals(s2_data_city('Toronto'), s2_data_country('Canada'));
       func.SetTag("category", "predicates");
     });
 
+    FunctionBuilder::RegisterScalar(loader, "s2_touches", [](ScalarFunctionBuilder& func) {
+      func.AddVariant([](ScalarFunctionVariantBuilder& variant) {
+        variant.AddParameter("geog1", Types::GEOGRAPHY());
+        variant.AddParameter("geog2", Types::GEOGRAPHY());
+        variant.SetReturnType(LogicalType::BOOLEAN);
+        variant.SetFunction(ExecuteTouchesFn);
+      });
+
+      func.SetDescription(R"(
+Returns true if the two geographies touch but do not overlap.
+
+Two geographies touch if they have at least one point in common but their
+interiors do not intersect. This is equivalent to:
+`s2_intersects(a, b) AND NOT s2_intersects(interior(a), interior(b))`
+)");
+      func.SetExample(R"(
+SELECT s2_touches(
+  'POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))',
+  'POLYGON ((10 0, 20 0, 20 10, 10 10, 10 0))'
+) AS touches;
+----
+SELECT s2_touches(
+  'POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))',
+  'POLYGON ((5 0, 15 0, 15 10, 5 10, 5 0))'
+) AS touches;
+)");
+
+      func.SetTag("ext", "geography");
+      func.SetTag("category", "predicates");
+    });
+
     FunctionBuilder::RegisterScalar(
         loader, "s2_intersection", [](ScalarFunctionBuilder& func) {
           func.AddVariant([](ScalarFunctionVariantBuilder& variant) {
@@ -274,6 +305,31 @@ SELECT s2_union(
               std::move(lhs), std::move(rhs),
               [&options](const S2ShapeIndex& lhs_index, const S2ShapeIndex& rhs_index) {
                 return S2BooleanOperation::Equals(lhs_index, rhs_index, options);
+              });
+        });
+  }
+
+  static void ExecuteTouchesFn(DataChunk& args, ExpressionState& state, Vector& result) {
+    // Touches: intersects with closed boundaries but not with open boundaries
+    // i.e., they share boundary points but interiors don't intersect
+    S2BooleanOperation::Options closed_options;
+    closed_options.set_polygon_model(S2BooleanOperation::PolygonModel::CLOSED);
+    closed_options.set_polyline_model(S2BooleanOperation::PolylineModel::CLOSED);
+
+    S2BooleanOperation::Options open_options;
+    open_options.set_polygon_model(S2BooleanOperation::PolygonModel::OPEN);
+    open_options.set_polyline_model(S2BooleanOperation::PolylineModel::OPEN);
+
+    return ExecutePredicateFn(
+        args, state, result,
+        [&closed_options, &open_options](UniqueGeography lhs, UniqueGeography rhs) {
+          return DispatchShapeIndexOp(
+              std::move(lhs), std::move(rhs),
+              [&closed_options,
+               &open_options](const S2ShapeIndex& lhs_index, const S2ShapeIndex& rhs_index) {
+                // Touches = intersects(closed) AND NOT intersects(open)
+                return S2BooleanOperation::Intersects(lhs_index, rhs_index, closed_options) &&
+                       !S2BooleanOperation::Intersects(lhs_index, rhs_index, open_options);
               });
         });
   }

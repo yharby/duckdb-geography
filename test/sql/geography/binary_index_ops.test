@@ -220,3 +220,52 @@ query I
 SELECT s2_max_distance(s2_data_city('Vancouver'), s2_data_country('Fiji')) > s2_distance(s2_data_city('Vancouver'), s2_data_country('Fiji'))
 ----
 true
+
+# Touches
+
+# Two adjacent polygons sharing an edge should touch
+query I
+SELECT s2_touches(
+  'POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))'::GEOGRAPHY,
+  'POLYGON ((10 0, 20 0, 20 10, 10 10, 10 0))'::GEOGRAPHY
+);
+----
+true
+
+# Overlapping polygons should NOT touch (they intersect in their interiors)
+query I
+SELECT s2_touches(
+  'POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))'::GEOGRAPHY,
+  'POLYGON ((5 0, 15 0, 15 10, 5 10, 5 0))'::GEOGRAPHY
+);
+----
+false
+
+# Disjoint polygons should NOT touch
+query I
+SELECT s2_touches(
+  'POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))'::GEOGRAPHY,
+  'POLYGON ((20 0, 30 0, 30 10, 20 10, 20 0))'::GEOGRAPHY
+);
+----
+false
+
+# Line touching polygon at corner should touch
+query I
+SELECT s2_touches(
+  'LINESTRING (10 10, 20 20)'::GEOGRAPHY,
+  'POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))'::GEOGRAPHY
+);
+----
+true
+
+# Empty geography should NOT touch
+query I
+SELECT s2_touches('POINT EMPTY'::GEOGRAPHY, 'POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))'::GEOGRAPHY);
+----
+false
+
+query I
+SELECT s2_touches('POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))'::GEOGRAPHY, 'POINT EMPTY'::GEOGRAPHY);
+----
+false
