@@ -220,3 +220,38 @@ query I
 SELECT s2_max_distance(s2_data_city('Vancouver'), s2_data_country('Fiji')) > s2_distance(s2_data_city('Vancouver'), s2_data_country('Fiji'))
 ----
 true
+
+# Symmetric Difference
+
+# Symmetric difference of overlapping polygons
+query I
+SELECT s2_sym_difference(
+  'POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))'::GEOGRAPHY,
+  'POLYGON ((5 5, 15 5, 15 15, 5 15, 5 5))'::GEOGRAPHY
+).s2_format(0);
+----
+MULTIPOLYGON (((5 10, 0 10, 0 0, 10 0, 10 5, 5 5, 5 10)), ((5 10, 10 10, 10 5, 15 5, 15 15, 5 15, 5 10)))
+
+# Symmetric difference where lhs is EMPTY
+query I
+SELECT s2_sym_difference('POINT EMPTY'::GEOGRAPHY, 'POINT (-64 45)'::GEOGRAPHY).s2_format(6);
+----
+POINT (-64 45)
+
+# Symmetric difference where rhs is EMPTY
+query I
+SELECT s2_sym_difference('POINT (-64 45)'::GEOGRAPHY, 'POINT EMPTY'::GEOGRAPHY).s2_format(6);
+----
+POINT (-64 45)
+
+# Symmetric difference of disjoint geographies (should be like union)
+query I
+SELECT s2_sym_difference('POINT (-64 45)'::GEOGRAPHY, 'POINT (-64 46)'::GEOGRAPHY).s2_format(6);
+----
+MULTIPOINT ((-64 45), (-64 46))
+
+# Symmetric difference of identical geographies (should be empty)
+query I
+SELECT s2_sym_difference('POINT (-64 45)'::GEOGRAPHY, 'POINT (-64 45)'::GEOGRAPHY);
+----
+GEOMETRYCOLLECTION EMPTY

@@ -224,6 +224,34 @@ SELECT s2_union(
       func.SetTag("ext", "geography");
       func.SetTag("category", "overlay");
     });
+
+    FunctionBuilder::RegisterScalar(
+        loader, "s2_sym_difference", [](ScalarFunctionBuilder& func) {
+          func.AddVariant([](ScalarFunctionVariantBuilder& variant) {
+            variant.AddParameter("geog1", Types::GEOGRAPHY());
+            variant.AddParameter("geog2", Types::GEOGRAPHY());
+            variant.SetReturnType(Types::GEOGRAPHY());
+            variant.SetFunction(ExecuteSymDifferenceFn);
+          });
+
+          func.SetDescription(R"(
+Returns the symmetric difference of two geographies.
+
+The symmetric difference contains all points that are in exactly one of the
+two input geographies (i.e., the union minus the intersection). This is
+equivalent to `s2_union(s2_difference(a, b), s2_difference(b, a))`.
+)");
+
+          func.SetExample(R"(
+SELECT s2_sym_difference(
+  'POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))',
+  'POLYGON ((5 5, 15 5, 15 15, 5 15, 5 5))'
+) as sym_diff
+)");
+
+          func.SetTag("ext", "geography");
+          func.SetTag("category", "overlay");
+        });
   }
 
   static void ExecuteMayIntersectFn(DataChunk& args, ExpressionState& state,
@@ -441,6 +469,48 @@ SELECT s2_union(
               [&options](const S2ShapeIndex& lhs_index, const S2ShapeIndex& rhs_index) {
                 return s2geography::s2_boolean_operation(
                     lhs_index, rhs_index, S2BooleanOperation::OpType::UNION, options);
+              });
+
+          return StringVector::AddStringOrBlob(result, encoder.Encode(*geog));
+        });
+  }
+
+  static void ExecuteSymDifferenceFn(DataChunk& args, ExpressionState& state,
+                                     Vector& result) {
+    ExecuteSymDifference(args.data[0], args.data[1], result, args.size());
+  }
+
+  static void ExecuteSymDifference(Vector& lhs, Vector& rhs, Vector& result, idx_t count) {
+    GeographyDecoder lhs_decoder;
+    GeographyDecoder rhs_decoder;
+    GeographyEncoder encoder;
+
+    s2geography::GlobalOptions options;
+    InitGlobalOptions(&options);
+
+    BinaryExecutor::Execute<string_t, string_t, string_t>(
+        lhs, rhs, result, count, [&](string_t lhs_str, string_t rhs_str) {
+          lhs_decoder.DecodeTagAndCovering(lhs_str);
+
+          // If the lefthand side is empty, the symmetric difference is the righthand side
+          if (lhs_decoder.tag.flags & s2geography::EncodeTag::kFlagEmpty) {
+            return StringVector::AddStringOrBlob(result, rhs_str);
+          }
+
+          // If the righthand side is empty, the symmetric difference is the lefthand side
+          rhs_decoder.DecodeTagAndCovering(rhs_str);
+          if (rhs_decoder.tag.flags & s2geography::EncodeTag::kFlagEmpty) {
+            return StringVector::AddStringOrBlob(result, lhs_str);
+          }
+
+          // (No optimization for definitely disjoint - symmetric diff is union for disjoint)
+
+          auto geog = DispatchShapeIndexOp(
+              lhs_decoder.Decode(lhs_str), rhs_decoder.Decode(rhs_str),
+              [&options](const S2ShapeIndex& lhs_index, const S2ShapeIndex& rhs_index) {
+                return s2geography::s2_boolean_operation(
+                    lhs_index, rhs_index, S2BooleanOperation::OpType::SYMMETRIC_DIFFERENCE,
+                    options);
               });
 
           return StringVector::AddStringOrBlob(result, encoder.Encode(*geog));
