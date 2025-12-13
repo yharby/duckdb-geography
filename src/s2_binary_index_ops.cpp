@@ -1,5 +1,6 @@
 
 #include "duckdb/main/database.hpp"
+#include "duckdb/common/vector_operations/generic_executor.hpp"
 
 #include "s2/s2cell_union.h"
 #include "s2/s2closest_edge_query.h"
@@ -9,6 +10,7 @@
 #include "s2_types.hpp"
 
 #include "s2geography/build.h"
+#include "s2geography/distance.h"
 
 #include "function_builder.hpp"
 #include "global_options.hpp"
@@ -648,12 +650,121 @@ SELECT s2_max_distance(
   }
 };
 
+struct S2ClosestPoint {
+  static void Register(ExtensionLoader& loader) {
+    FunctionBuilder::RegisterScalar(
+        loader, "s2_closest_point", [](ScalarFunctionBuilder& func) {
+          func.AddVariant([](ScalarFunctionVariantBuilder& variant) {
+            variant.AddParameter("geog1", Types::GEOGRAPHY());
+            variant.AddParameter("geog2", Types::GEOGRAPHY());
+            variant.SetReturnType(Types::GEOGRAPHY());
+            variant.SetFunction(ExecuteFn);
+          });
+
+          func.SetDescription(R"(
+Returns the point on the first geography that is closest to the second geography.
+
+This is the point on geog1 that minimizes the distance to geog2. Returns an
+empty geography if either input is empty.
+)");
+          func.SetExample(R"(
+SELECT s2_closest_point(
+  'LINESTRING (0 0, 10 10)'::GEOGRAPHY,
+  'POINT (5 0)'::GEOGRAPHY
+).s2_format(6) AS closest;
+)");
+
+          func.SetTag("ext", "geography");
+          func.SetTag("category", "accessors");
+        });
+  }
+
+  static inline void ExecuteFn(DataChunk& args, ExpressionState& state, Vector& result) {
+    Execute(args.data[0], args.data[1], result, args.size());
+  }
+
+  static void Execute(Vector& lhs, Vector& rhs, Vector& result, idx_t count) {
+    GeographyDecoder lhs_decoder;
+    GeographyDecoder rhs_decoder;
+    GeographyEncoder encoder;
+
+    GenericExecutor::ExecuteBinary<PrimitiveType<string_t>, PrimitiveType<string_t>,
+                                   PrimitiveType<string_t>>(
+        lhs, rhs, result, count,
+        [&](PrimitiveType<string_t> geog1_str_in, PrimitiveType<string_t> geog2_str_in) {
+          string_t geog1_str = geog1_str_in.val;
+          string_t geog2_str = geog2_str_in.val;
+
+          lhs_decoder.DecodeTag(geog1_str);
+          rhs_decoder.DecodeTag(geog2_str);
+
+          // If either geography is empty, return empty
+          if (lhs_decoder.tag.flags & s2geography::EncodeTag::kFlagEmpty ||
+              rhs_decoder.tag.flags & s2geography::EncodeTag::kFlagEmpty) {
+            auto empty_geog = make_uniq<s2geography::GeographyCollection>();
+            return PrimitiveType<string_t>{
+                StringVector::AddStringOrBlob(result, encoder.Encode(*empty_geog))};
+          }
+
+          // If we have two snapped cell centers, the closest point is geog1 itself
+          if (lhs_decoder.tag.kind == s2geography::GeographyKind::CELL_CENTER) {
+            return PrimitiveType<string_t>{StringVector::AddStringOrBlob(result, geog1_str)};
+          }
+
+          // Otherwise, decode and use S2ClosestEdgeQuery to find the closest point
+          auto geog1 = lhs_decoder.Decode(geog1_str);
+          auto geog2 = rhs_decoder.Decode(geog2_str);
+
+          S2Point closest_point = DispatchShapeIndexOp(
+              std::move(geog1), std::move(geog2),
+              [](const S2ShapeIndex& lhs_index, const S2ShapeIndex& rhs_index) {
+                // Find the closest edge on lhs to rhs
+                S2ClosestEdgeQuery query1(&lhs_index);
+                query1.mutable_options()->set_include_interiors(false);
+                S2ClosestEdgeQuery::ShapeIndexTarget target(&rhs_index);
+                const auto& result1 = query1.FindClosestEdge(&target);
+
+                if (result1.edge_id() == -1) {
+                  return S2Point(0, 0, 0);  // No edges found
+                }
+
+                // Get the edge from lhs that is closest to rhs
+                S2Shape::Edge edge1 = query1.GetEdge(result1);
+
+                // Find the point on edge1 closest to rhs
+                S2ClosestEdgeQuery query2(&rhs_index);
+                query2.mutable_options()->set_include_interiors(false);
+                S2ClosestEdgeQuery::EdgeTarget target2(edge1.v0, edge1.v1);
+                auto result2 = query2.FindClosestEdge(&target2);
+
+                if (result2.is_interior()) {
+                  // If result2 is interior, use edge1's closest point to the target
+                  return edge1.v0;  // fallback
+                }
+
+                S2Shape::Edge edge2 = query2.GetEdge(result2);
+
+                // Get the closest point pair between edge1 and edge2
+                auto point_pair =
+                    S2::GetEdgePairClosestPoints(edge1.v0, edge1.v1, edge2.v0, edge2.v1);
+                return point_pair.first;  // Return the point on geog1
+              });
+
+          // Convert S2Point to a PointGeography
+          auto point_geog = make_uniq<s2geography::PointGeography>(closest_point);
+          return PrimitiveType<string_t>{
+              StringVector::AddStringOrBlob(result, encoder.Encode(*point_geog))};
+        });
+  }
+};
+
 }  // namespace
 
 void RegisterS2GeographyPredicates(ExtensionLoader& loader) {
   S2BinaryIndexOp::Register(loader);
   S2Distance::Register(loader);
   S2DWithin::Register(loader);
+  S2ClosestPoint::Register(loader);
 }
 
 }  // namespace duckdb_s2
